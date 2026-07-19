@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Dakhomepeint - Dashboard</title>
+<meta name="description" content="Suivi d'activité peinture & décoration - Dakhomepeint" />
+
+<!-- PWA / installation -->
+<link rel="manifest" href="./manifest.json" />
+<meta name="theme-color" content="#141414" />
+<link rel="icon" href="./icon-192.png" />
+<link rel="apple-touch-icon" href="./icon-180.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black" />
+<meta name="apple-mobile-web-app-title" content="Dakhomepeint" />
+<meta name="mobile-web-app-capable" content="yes" />
+
+<style>
+  html, body { margin: 0; padding: 0; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  ::-webkit-scrollbar { height: 8px; width: 8px; }
+  ::-webkit-scrollbar-thumb { background: #cccccc; border-radius: 4px; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .spin { animation: spin 1s linear infinite; display: inline-block; }
+  @media print {
+    .no-print { display: none !important; }
+    .print-area { position: static !important; background: white !important; }
+  }
+</style>
+
+<!-- React (no build step needed) -->
+<script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+</head>
+<body>
+<div id="root"><p style="font-family: system-ui, sans-serif; text-align:center; margin-top: 80px; color:#6B6B6B;">Chargement du dashboard…</p></div>
+
+<script>
+  function showFatalError(msg) {
+    var root = document.getElementById("root");
+    if (root) {
+      root.innerHTML = '<pre style="white-space:pre-wrap;padding:20px;color:#b00020;font-family:monospace;font-size:12px;line-height:1.5;">ERREUR DE CHARGEMENT :\n\n' + msg + '</pre>';
+    }
+  }
+  window.addEventListener("error", function (e) {
+    showFatalError((e.message || "erreur inconnue") + "\n" + (e.filename || "") + ":" + (e.lineno || "") + ":" + (e.colno || ""));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    var reason = e.reason && e.reason.message ? e.reason.message : String(e.reason);
+    showFatalError("Promesse rejetée : " + reason);
+  });
+</script>
+<!-- Register the service worker so the app can be installed and used offline -->
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./sw.js").catch(() => {});
+    });
+  }
+  // Storage polyfill: same interface Dakhomepeint uses elsewhere, backed by
+  // this device's localStorage — fully local, no account or internet required
+  // after the first load.
+  window.storage = {
+    async get(key) {
+      const v = localStorage.getItem(key);
+      if (v === null) throw new Error("not found");
+      return { key, value: v };
+    },
+    async set(key, value) {
+      localStorage.setItem(key, value);
+      return { key, value };
+    },
+  };
+</script>
+
+<script>
+"use strict";
+const { useState, useEffect, useMemo } = React;
+// ---------- Brand tokens (from the Dakhomepeint logo) ----------
+const NOIR = "#141414";
+const ROUGE = "#D71921";
+const ROUGE_DEEP = "#8C0F16";
+const BLANC = "#FFFFFF";
+const FOND = "#F4F4F4";
+const BORDURE = "#E5E5E5";
+const TEXTE = "#1A1A1A";
+const TEXTE_GRIS = "#6B6B6B";
+// ---------- Domain constants ----------
+const STATUTS = [
+    { key: "nouvelle", label: "Nouvelle commande", color: "#8A8A8A" },
+    { key: "validee", label: "Commande validée", color: "#2563EB" },
+    { key: "en_cours", label: "Travaux en cours", color: ROUGE },
+    { key: "terminee", label: "Travaux terminés", color: NOIR },
+    { key: "payee", label: "Payée", color: "#1F9254" },
+];
+const STATUT_INDEX = Object.fromEntries(STATUTS.map((s, i) => [s.key, i]));
+const STATUT_BY_KEY = Object.fromEntries(STATUTS.map((s) => [s.key, s]));
+const TYPES_CLIENT = ["Entreprise", "Institution / Ambassade", "Particulier", "Hôtellerie / Commerce"];
+const MODES_PAIEMENT = ["Wave", "Orange Money", "Expresso", "Espèces", "Virement bancaire", "Chèque"];
+const MODE_COLORS = { "Wave": "#2563EB", "Orange Money": "#F97316", "Expresso": "#7C3AED", "Espèces": "#1F9254", "Virement bancaire": "#0EA5A4", "Chèque": "#8A8A8A" };
+const STATUTS_PAIEMENT = [
+    { key: "non_paye", label: "Non payé", color: "#8A8A8A" },
+    { key: "acompte", label: "Acompte versé", color: "#D97706" },
+    { key: "paye_integral", label: "Payé intégralement", color: "#1F9254" },
+];
+const CMD_KEY = "dakhomepeint:commandes";
+const ENTREPRISE_KEY = "dakhomepeint:entreprise";
+const MESSAGES_KEY = "dakhomepeint:messages";
+const emptyForm = {
+    client: "", telephone: "", email: "",
+    typeClient: TYPES_CLIENT[0],
+    site: "",
+    surface: "", prixM2: "", montantDevis: "", montantManuel: false,
+    montantEncaisse: "",
+    modePaiement: MODES_PAIEMENT[0], statutPaiement: "non_paye",
+    statut: "nouvelle",
+    dateCommande: "", dateFinPrevue: "",
+    notes: "",
+    numeroFacture: "", dateFacture: "",
+};
+const defaultEntreprise = {
+    nom: "Dakhomepeint", slogan: "Peinture & Décoration", telephone: "", email: "",
+    adresse: "Dakar, Sénégal", ninea: "", siteWeb: "dakhomegroup.com",
+};
+const defaultMessages = [
+    { id: "m1", titre: "Confirmation de commande", contenu: "Bonjour {client}, nous confirmons la prise en charge de votre commande de peinture au niveau de {site}. Notre équipe reviendra vers vous pour planifier la visite technique. Merci de votre confiance — Dakhomepeint." },
+    { id: "m2", titre: "Rappel de paiement", contenu: "Bonjour {client}, un rappel concernant le solde restant sur votre chantier ({site}). Merci de bien vouloir régulariser dès que possible. N'hésitez pas à nous contacter pour toute question. Dakhomepeint." },
+    { id: "m3", titre: "Remerciement après travaux", contenu: "Bonjour {client}, les travaux de peinture au niveau de {site} sont maintenant terminés. Merci pour votre confiance envers Dakhomepeint ! N'hésitez pas à nous recommander autour de vous." },
+    { id: "m4", titre: "Message de prospection", contenu: "Bonjour, je suis Jean-Noël Koua de Dakhomepeint, spécialiste en peinture et décoration à Dakar. Nous accompagnons les entreprises, institutions et particuliers dans l'embellissement de leurs espaces. Seriez-vous disponible pour un échange sur vos besoins ?" },
+];
+function formatFCFA(n) {
+    const v = Number(n) || 0;
+    return new Intl.NumberFormat("fr-FR").format(v) + " FCFA";
+}
+function todayISO() { return new Date().toISOString().slice(0, 10); }
+function safeId() { return (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now() + Math.random()); }
+function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext)
+        return navigator.clipboard.writeText(text);
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+        document.execCommand("copy");
+    }
+    finally {
+        document.body.removeChild(ta);
+    }
+    return Promise.resolve();
+}
+// ================= Small UI helpers =================
+const th = { padding: "11px 14px", fontSize: 11.5, fontWeight: 700, color: TEXTE_GRIS, letterSpacing: 0.4, textTransform: "uppercase" };
+const td = { padding: "12px 14px", verticalAlign: "middle" };
+const iconBtn = { background: "none", border: "none", cursor: "pointer", padding: 6, marginLeft: 2, fontSize: 14 };
+const inputStyle = { width: "100%", padding: "9px 12px", borderRadius: 8, border: `1px solid ${BORDURE}`, fontSize: 13.5, boxSizing: "border-box", outline: "none" };
+function Ic({ children, size = 15 }) {
+    return React.createElement("span", { style: { fontSize: size, lineHeight: 1, display: "inline-block" } }, children);
+}
+function Label({ children }) {
+    return React.createElement("div", { style: { fontSize: 12, fontWeight: 600, color: TEXTE_GRIS, marginBottom: 5 } }, children);
+}
+function Input({ value, onChange, type = "text", placeholder, disabled }) {
+    return (React.createElement("input", { type: type, value: value, disabled: disabled, onChange: (e) => onChange(e.target.value), placeholder: placeholder, style: { ...inputStyle, background: disabled ? FOND : BLANC, color: disabled ? TEXTE_GRIS : TEXTE } }));
+}
+function Select({ value, onChange, options, labels, style }) {
+    return (React.createElement("select", { value: value, onChange: (e) => onChange(e.target.value), style: { ...inputStyle, background: BLANC, ...style } }, options.map((opt, i) => React.createElement("option", { key: opt, value: opt }, labels ? labels[i] : opt))));
+}
+function StatusStepper({ statutKey }) {
+    var _a;
+    const idx = (_a = STATUT_INDEX[statutKey]) !== null && _a !== void 0 ? _a : 0;
+    const current = STATUTS[idx];
+    return (React.createElement("div", null,
+        React.createElement("div", { style: { display: "flex", gap: 3 } }, STATUTS.map((s, i) => (React.createElement("div", { key: s.key, title: s.label, style: { height: 6, flex: 1, borderRadius: 3, background: i <= idx ? current.color : "#E5E5E5" } })))),
+        React.createElement("div", { style: { fontSize: 11.5, marginTop: 5, fontWeight: 600, color: current.color } }, current.label)));
+}
+function KpiCard({ icon, label, value, sub, accent }) {
+    return (React.createElement("div", { style: { background: BLANC, border: `1px solid ${BORDURE}`, borderRadius: 12, padding: "18px 20px", flex: "1 1 220px", minWidth: 220 } },
+        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 10 } },
+            React.createElement("div", { style: { width: 34, height: 34, borderRadius: 9, background: accent || ROUGE, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } },
+                React.createElement(Ic, { size: 17 }, icon)),
+            React.createElement("div", { style: { fontSize: 12.5, color: TEXTE_GRIS, fontWeight: 600, letterSpacing: 0.3 } }, label.toUpperCase())),
+        React.createElement("div", { style: { fontFamily: "Georgia, serif", fontSize: 24, fontWeight: 700, color: TEXTE } }, value),
+        sub && React.createElement("div", { style: { fontSize: 12.5, color: TEXTE_GRIS, marginTop: 3 } }, sub)));
+}
+function TabButton({ active, onClick, icon, label }) {
+    return (React.createElement("button", { onClick: onClick, style: {
+            display: "flex", alignItems: "center", gap: 7, padding: "10px 16px", borderRadius: 9,
+            border: "none", cursor: "pointer", fontSize: 13.5, fontWeight: 600,
+            background: active ? ROUGE : "transparent", color: active ? BLANC : "#CFCFCF",
+        } },
+        React.createElement(Ic, { size: 14 }, icon),
+        " ",
+        label));
+}
+// ---------- Lightweight, dependency-free charts ----------
+function BarList({ data }) {
+    const max = Math.max(1, ...data.map((d) => d.valeur));
+    return (React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 12 } }, data.map((d, i) => (React.createElement("div", { key: i },
+        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4 } },
+            React.createElement("span", { style: { color: TEXTE_GRIS } }, d.name),
+            React.createElement("span", { style: { fontWeight: 700 } }, formatFCFA(d.valeur))),
+        React.createElement("div", { style: { background: "#EEE", borderRadius: 6, height: 10, overflow: "hidden" } },
+            React.createElement("div", { style: { width: `${(d.valeur / max) * 100}%`, background: d.color, height: "100%", borderRadius: 6 } })))))));
+}
+function Donut({ data, size = 170 }) {
+    const total = data.reduce((s, d) => s + d.value, 0) || 1;
+    const r = size / 2 - 15;
+    const cx = size / 2, cy = size / 2;
+    const circ = 2 * Math.PI * r;
+    let acc = 0;
+    return (React.createElement("svg", { width: size, height: size, viewBox: `0 0 ${size} ${size}` },
+        React.createElement("circle", { cx: cx, cy: cy, r: r, fill: "none", stroke: "#EEE", strokeWidth: 20 }),
+        data.map((d, i) => {
+            const frac = d.value / total;
+            const dash = frac * circ;
+            const el = (React.createElement("circle", { key: i, cx: cx, cy: cy, r: r, fill: "none", stroke: d.color, strokeWidth: 20, strokeDasharray: `${dash} ${circ - dash}`, strokeDashoffset: -acc, transform: `rotate(-90 ${cx} ${cy})`, strokeLinecap: "butt" }));
+            acc += dash;
+            return el;
+        })));
+}
+// ================= Main component =================
+function Dashboard() {
+    var _a;
+    const [commandes, setCommandes] = useState([]);
+    const [entreprise, setEntreprise] = useState(defaultEntreprise);
+    const [messages, setMessages] = useState(defaultMessages);
+    const [loading, setLoading] = useState(true);
+    const [storageOk, setStorageOk] = useState(true);
+    const [tab, setTab] = useState("vue");
+    const [showForm, setShowForm] = useState(false);
+    const [editingId, setEditingId] = useState(null);
+    const [form, setForm] = useState(emptyForm);
+    const [formError, setFormError] = useState("");
+    const [filterStatut, setFilterStatut] = useState("Tous");
+    const [search, setSearch] = useState("");
+    const [confirmDelete, setConfirmDelete] = useState(null);
+    const [invoiceFor, setInvoiceFor] = useState(null);
+    const [copiedId, setCopiedId] = useState(null);
+    useEffect(() => {
+        let mounted = true;
+        (async () => {
+            try {
+                const r = await window.storage.get(CMD_KEY);
+                if (mounted && (r === null || r === void 0 ? void 0 : r.value))
+                    setCommandes(JSON.parse(r.value));
+            }
+            catch (e) { }
+            try {
+                const r2 = await window.storage.get(ENTREPRISE_KEY);
+                if (mounted && (r2 === null || r2 === void 0 ? void 0 : r2.value))
+                    setEntreprise(JSON.parse(r2.value));
+            }
+            catch (e) { }
+            try {
+                const r3 = await window.storage.get(MESSAGES_KEY);
+                if (mounted && (r3 === null || r3 === void 0 ? void 0 : r3.value))
+                    setMessages(JSON.parse(r3.value));
+            }
+            catch (e) { }
+            if (mounted)
+                setLoading(false);
+        })();
+        return () => { mounted = false; };
+    }, []);
+    async function persistCommandes(next) {
+        setCommandes(next);
+        try {
+            const r = await window.storage.set(CMD_KEY, JSON.stringify(next));
+            setStorageOk(!!r);
+        }
+        catch (e) {
+            setStorageOk(false);
+        }
+    }
+    async function persistEntreprise(next) {
+        setEntreprise(next);
+        try {
+            const r = await window.storage.set(ENTREPRISE_KEY, JSON.stringify(next));
+            setStorageOk(!!r);
+        }
+        catch (e) {
+            setStorageOk(false);
+        }
+    }
+    async function persistMessages(next) {
+        setMessages(next);
+        try {
+            const r = await window.storage.set(MESSAGES_KEY, JSON.stringify(next));
+            setStorageOk(!!r);
+        }
+        catch (e) {
+            setStorageOk(false);
+        }
+    }
+    const filtered = useMemo(() => commandes.filter((c) => {
+        const matchStatut = filterStatut === "Tous" || c.statut === filterStatut;
+        const q = search.trim().toLowerCase();
+        const matchSearch = !q || c.client.toLowerCase().includes(q) || c.site.toLowerCase().includes(q);
+        return matchStatut && matchSearch;
+    }), [commandes, filterStatut, search]);
+    const kpis = useMemo(() => {
+        const enAttenteValidation = commandes.filter((c) => c.statut === "nouvelle").length;
+        const enCours = commandes.filter((c) => c.statut === "en_cours").length;
+        const totalEncaisse = commandes.reduce((s, c) => s + (Number(c.montantEncaisse) || 0), 0);
+        const resteAEncaisser = commandes.reduce((s, c) => s + Math.max((Number(c.montantDevis) || 0) - (Number(c.montantEncaisse) || 0), 0), 0);
+        return { enAttenteValidation, enCours, totalEncaisse, resteAEncaisser };
+    }, [commandes]);
+    const pipelineData = useMemo(() => STATUTS.map((s) => ({
+        name: s.label, valeur: commandes.filter((c) => c.statut === s.key).reduce((sum, c) => sum + (Number(c.montantDevis) || 0), 0), color: s.color,
+    })), [commandes]);
+    const typeData = useMemo(() => TYPES_CLIENT.map((t, i) => ({
+        name: t, value: commandes.filter((c) => c.typeClient === t).length, color: [ROUGE, NOIR, "#8A8A8A", "#D97706"][i],
+    })).filter((d) => d.value > 0), [commandes]);
+    const paiementData = useMemo(() => MODES_PAIEMENT.map((m) => ({
+        name: m, valeur: commandes.filter((c) => c.modePaiement === m).reduce((sum, c) => sum + (Number(c.montantEncaisse) || 0), 0),
+    })).filter((d) => d.valeur > 0), [commandes]);
+    function openAdd() { setForm({ ...emptyForm, dateCommande: todayISO() }); setEditingId(null); setFormError(""); setShowForm(true); }
+    function openEdit(c) { setForm({ ...c }); setEditingId(c.id); setFormError(""); setShowForm(true); }
+    function closeForm() { setShowForm(false); setFormError(""); }
+    function updateField(field, value) {
+        setForm((f) => {
+            const next = { ...f, [field]: value };
+            if ((field === "surface" || field === "prixM2") && !next.montantManuel) {
+                const surf = Number(field === "surface" ? value : f.surface) || 0;
+                const prix = Number(field === "prixM2" ? value : f.prixM2) || 0;
+                next.montantDevis = surf && prix ? String(surf * prix) : next.montantDevis;
+            }
+            if (field === "montantManuel" && value === false) {
+                const surf = Number(f.surface) || 0;
+                const prix = Number(f.prixM2) || 0;
+                next.montantDevis = surf && prix ? String(surf * prix) : "";
+            }
+            return next;
+        });
+    }
+    function handleSave() {
+        if (!form.client.trim() || !form.site.trim()) {
+            setFormError("Le client et le site sont obligatoires.");
+            return;
+        }
+        if (editingId)
+            persistCommandes(commandes.map((c) => (c.id === editingId ? { ...form, id: editingId } : c)));
+        else
+            persistCommandes([...commandes, { ...form, id: safeId() }]);
+        setShowForm(false);
+    }
+    function handleDelete(id) { persistCommandes(commandes.filter((c) => c.id !== id)); setConfirmDelete(null); }
+    function validerCommande(id) { persistCommandes(commandes.map((c) => (c.id === id ? { ...c, statut: "validee" } : c))); }
+    function changerStatut(id, statut) { persistCommandes(commandes.map((c) => (c.id === id ? { ...c, statut } : c))); }
+    function changerPaiement(id, field, value) { persistCommandes(commandes.map((c) => (c.id === id ? { ...c, [field]: value } : c))); }
+    function ouvrirFacture(c) {
+        if (c.numeroFacture) {
+            setInvoiceFor(c);
+            return;
+        }
+        const dejaFacturees = commandes.filter((x) => x.numeroFacture).length;
+        const numero = `FAC-${new Date().getFullYear()}-${String(dejaFacturees + 1).padStart(3, "0")}`;
+        const updated = { ...c, numeroFacture: numero, dateFacture: todayISO() };
+        persistCommandes(commandes.map((x) => (x.id === c.id ? updated : x)));
+        setInvoiceFor(updated);
+    }
+    function copierMessage(id, texte) {
+        copyText(texte).then(() => { setCopiedId(id); setTimeout(() => setCopiedId(null), 1800); }).catch(() => { });
+    }
+    if (loading) {
+        return (React.createElement("div", { style: { minHeight: "100vh", background: FOND, display: "flex", alignItems: "center", justifyContent: "center" } },
+            React.createElement("span", { className: "spin", style: { fontSize: 26 } }, "\u23F3")));
+    }
+    return (React.createElement("div", { style: { minHeight: "100vh", background: FOND, color: TEXTE } },
+        React.createElement("div", { className: "no-print", style: { background: NOIR, padding: "18px 28px" } },
+            React.createElement("div", { style: { maxWidth: 1180, margin: "0 auto" } },
+                React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 14 } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
+                        React.createElement("div", { style: { width: 42, height: 42, borderRadius: "50%", background: ROUGE, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, overflow: "hidden" } },
+                            React.createElement("img", { src: "./icon-192.png", alt: "Dakhomepeint", style: { width: "100%", height: "100%", objectFit: "cover" }, onError: (e) => { e.target.style.display = "none"; } })),
+                        React.createElement("div", null,
+                            React.createElement("div", { style: { fontFamily: "Georgia, serif", fontSize: 20, fontWeight: 700, color: BLANC, letterSpacing: 0.5 } }, "DAKHOMEPEINT"),
+                            React.createElement("div", { style: { fontSize: 12.5, color: "#C9C9C9" } }, "Suivi d'activit\u00E9 \u2014 peinture & d\u00E9coration"))),
+                    React.createElement("button", { onClick: openAdd, style: { display: "flex", alignItems: "center", gap: 8, background: ROUGE, color: BLANC, border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 14, fontWeight: 600, cursor: "pointer" } },
+                        React.createElement(Ic, { size: 14 }, "\u2795"),
+                        " Nouvelle commande")),
+                React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
+                    React.createElement(TabButton, { active: tab === "vue", onClick: () => setTab("vue"), icon: "\uD83D\uDCCA", label: "Vue d'ensemble" }),
+                    React.createElement(TabButton, { active: tab === "commandes", onClick: () => setTab("commandes"), icon: "\uD83D\uDED2", label: "Commandes clients" }),
+                    React.createElement(TabButton, { active: tab === "paiements", onClick: () => setTab("paiements"), icon: "\uD83D\uDCB3", label: "Paiements" }),
+                    React.createElement(TabButton, { active: tab === "entreprise", onClick: () => setTab("entreprise"), icon: "\uD83C\uDFE2", label: "Entreprise & communication" })))),
+        React.createElement("div", { className: "no-print", style: { maxWidth: 1180, margin: "0 auto", padding: "24px 16px 60px" } },
+            !storageOk && (React.createElement("div", { style: { background: "#FDECEC", border: "1px solid #F5B5B5", color: ROUGE_DEEP, borderRadius: 8, padding: "10px 14px", fontSize: 13, marginBottom: 18 } }, "La sauvegarde locale a rencontr\u00E9 un probl\u00E8me sur cet appareil. Vos derni\u00E8res modifications peuvent ne pas \u00EAtre enregistr\u00E9es.")),
+            tab === "vue" && (React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 22 } },
+                    React.createElement(KpiCard, { icon: "\uD83D\uDCCB", label: "\u00C0 valider", value: kpis.enAttenteValidation, sub: "Commandes en attente", accent: "#8A8A8A" }),
+                    React.createElement(KpiCard, { icon: "\uD83D\uDD8C\uFE0F", label: "Chantiers en cours", value: kpis.enCours, accent: ROUGE }),
+                    React.createElement(KpiCard, { icon: "\uD83D\uDCB0", label: "Total encaiss\u00E9", value: formatFCFA(kpis.totalEncaisse), accent: "#1F9254" }),
+                    React.createElement(KpiCard, { icon: "\uD83D\uDCCA", label: "Reste \u00E0 encaisser", value: formatFCFA(kpis.resteAEncaisser), accent: NOIR })),
+                commandes.length > 0 && (React.createElement("div", { style: { display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 22 } },
+                    React.createElement("div", { style: { background: BLANC, border: `1px solid ${BORDURE}`, borderRadius: 12, padding: "18px 20px", flex: "2 1 420px", minWidth: 300 } },
+                        React.createElement("div", { style: { fontWeight: 700, fontSize: 14.5, marginBottom: 14 } }, "Valeur du pipeline par statut"),
+                        React.createElement(BarList, { data: pipelineData })),
+                    React.createElement("div", { style: { background: BLANC, border: `1px solid ${BORDURE}`, borderRadius: 12, padding: "18px 20px", flex: "1 1 260px", minWidth: 260, display: "flex", flexDirection: "column", alignItems: "center" } },
+                        React.createElement("div", { style: { fontWeight: 700, fontSize: 14.5, marginBottom: 14, alignSelf: "flex-start" } }, "Par type de client"),
+                        typeData.length ? React.createElement(Donut, { data: typeData }) : React.createElement("div", { style: { color: TEXTE_GRIS, fontSize: 13, padding: "40px 0" } }, "Pas encore de donn\u00E9es"),
+                        React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 10, marginTop: 14, justifyContent: "center" } }, typeData.map((d, i) => (React.createElement("div", { key: d.name, style: { display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: TEXTE_GRIS } },
+                            React.createElement("span", { style: { width: 8, height: 8, borderRadius: "50%", background: d.color, display: "inline-block" } }),
+                            d.name))))))),
+                commandes.length === 0 && React.createElement(EmptyState, { onAdd: openAdd }))),
+            tab === "commandes" && (React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 } },
+                    React.createElement("div", { style: { position: "relative", flex: "1 1 240px", minWidth: 220 } },
+                        React.createElement("span", { style: { position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)" } }, "\uD83D\uDD0D"),
+                        React.createElement("input", { value: search, onChange: (e) => setSearch(e.target.value), placeholder: "Rechercher un client ou un site...", style: { width: "100%", padding: "9px 12px 9px 34px", borderRadius: 8, border: `1px solid ${BORDURE}`, fontSize: 13.5, boxSizing: "border-box", outline: "none" } })),
+                    React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
+                        React.createElement("button", { onClick: () => setFilterStatut("Tous"), style: { padding: "7px 12px", borderRadius: 20, fontSize: 12.5, fontWeight: 600, cursor: "pointer", border: `1px solid ${filterStatut === "Tous" ? NOIR : BORDURE}`, background: filterStatut === "Tous" ? NOIR : BLANC, color: filterStatut === "Tous" ? BLANC : TEXTE_GRIS } }, "Tous"),
+                        STATUTS.map((s) => (React.createElement("button", { key: s.key, onClick: () => setFilterStatut(s.key), style: { padding: "7px 12px", borderRadius: 20, fontSize: 12.5, fontWeight: 600, cursor: "pointer", border: `1px solid ${filterStatut === s.key ? s.color : BORDURE}`, background: filterStatut === s.key ? s.color : BLANC, color: filterStatut === s.key ? BLANC : TEXTE_GRIS } }, s.label))))),
+                commandes.length === 0 ? React.createElement(EmptyState, { onAdd: openAdd }) : (React.createElement("div", { style: { background: BLANC, border: `1px solid ${BORDURE}`, borderRadius: 12, overflow: "hidden" } },
+                    React.createElement("div", { style: { overflowX: "auto" } },
+                        React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13.5, minWidth: 980 } },
+                            React.createElement("thead", null,
+                                React.createElement("tr", { style: { background: FOND, textAlign: "left" } },
+                                    React.createElement("th", { style: th }, "Client"),
+                                    React.createElement("th", { style: th }, "Site"),
+                                    React.createElement("th", { style: { ...th, textAlign: "right" } }, "Surface"),
+                                    React.createElement("th", { style: { ...th, textAlign: "right" } }, "Prix / m\u00B2"),
+                                    React.createElement("th", { style: { ...th, textAlign: "right" } }, "Montant devis"),
+                                    React.createElement("th", { style: { ...th, minWidth: 150 } }, "Statut"),
+                                    React.createElement("th", { style: { ...th, textAlign: "right" } }))),
+                            React.createElement("tbody", null,
+                                filtered.map((c) => (React.createElement("tr", { key: c.id, style: { borderTop: `1px solid ${BORDURE}` } },
+                                    React.createElement("td", { style: { ...td, fontWeight: 600 } }, c.client),
+                                    React.createElement("td", { style: td },
+                                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 5, color: TEXTE_GRIS } },
+                                            React.createElement(Ic, { size: 12 }, "\uD83D\uDCCD"),
+                                            c.site)),
+                                    React.createElement("td", { style: { ...td, textAlign: "right" } }, c.surface ? `${c.surface} m²` : "—"),
+                                    React.createElement("td", { style: { ...td, textAlign: "right" } }, c.prixM2 ? formatFCFA(c.prixM2) : "—"),
+                                    React.createElement("td", { style: { ...td, textAlign: "right", fontWeight: 600 } }, formatFCFA(c.montantDevis)),
+                                    React.createElement("td", { style: { ...td, minWidth: 150 } }, c.statut === "nouvelle" ? React.createElement(StatusStepper, { statutKey: c.statut }) : (React.createElement(Select, { value: c.statut, onChange: (v) => changerStatut(c.id, v), options: STATUTS.filter((s) => s.key !== "nouvelle").map((s) => s.key), labels: STATUTS.filter((s) => s.key !== "nouvelle").map((s) => s.label), style: { padding: "6px 8px", fontSize: 12, fontWeight: 600, color: STATUT_BY_KEY[c.statut].color } }))),
+                                    React.createElement("td", { style: { ...td, textAlign: "right", whiteSpace: "nowrap" } },
+                                        c.statut === "nouvelle" && (React.createElement("button", { onClick: () => validerCommande(c.id), title: "Valider la commande", style: { ...iconBtn, display: "inline-flex", alignItems: "center", gap: 4, background: "#E9F7EF", borderRadius: 7, padding: "6px 9px" } },
+                                            React.createElement(Ic, { size: 13 }, "\u2705"),
+                                            React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: "#1F9254" } }, "Valider"))),
+                                        React.createElement("button", { onClick: () => ouvrirFacture(c), title: c.statut === "nouvelle" ? "Validez la commande pour générer la facture" : "Générer / voir la facture", disabled: c.statut === "nouvelle", style: { ...iconBtn, opacity: c.statut === "nouvelle" ? 0.35 : 1, cursor: c.statut === "nouvelle" ? "not-allowed" : "pointer" } }, "\uD83E\uDDFE"),
+                                        React.createElement("button", { onClick: () => openEdit(c), style: iconBtn, title: "Modifier" }, "\u270F\uFE0F"),
+                                        React.createElement("button", { onClick: () => setConfirmDelete(c.id), style: iconBtn, title: "Supprimer" }, "\uD83D\uDDD1\uFE0F"))))),
+                                filtered.length === 0 && React.createElement("tr", null,
+                                    React.createElement("td", { colSpan: 7, style: { padding: "26px 16px", textAlign: "center", color: TEXTE_GRIS, fontSize: 13 } }, "Aucune commande ne correspond \u00E0 ce filtre."))))))))),
+            tab === "paiements" && (React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 22 } },
+                    MODES_PAIEMENT.map((m) => {
+                        const total = commandes.filter((c) => c.modePaiement === m).reduce((s, c) => s + (Number(c.montantEncaisse) || 0), 0);
+                        if (!total)
+                            return null;
+                        return React.createElement(KpiCard, { key: m, icon: "\uD83D\uDCB3", label: m, value: formatFCFA(total), accent: MODE_COLORS[m] });
+                    }),
+                    paiementData.length === 0 && React.createElement("div", { style: { color: TEXTE_GRIS, fontSize: 13.5 } }, "Aucun encaissement enregistr\u00E9 pour l'instant.")),
+                paiementData.length > 0 && (React.createElement("div", { style: { background: BLANC, border: `1px solid ${BORDURE}`, borderRadius: 12, padding: "18px 20px", marginBottom: 22 } },
+                    React.createElement("div", { style: { fontWeight: 700, fontSize: 14.5, marginBottom: 14 } }, "Montant encaiss\u00E9 par mode de paiement"),
+                    React.createElement(BarList, { data: paiementData.map((d) => ({ ...d, color: MODE_COLORS[d.name] })) }))),
+                commandes.length === 0 ? React.createElement(EmptyState, { onAdd: openAdd }) : (React.createElement("div", { style: { background: BLANC, border: `1px solid ${BORDURE}`, borderRadius: 12, overflow: "hidden" } },
+                    React.createElement("div", { style: { overflowX: "auto" } },
+                        React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13.5, minWidth: 900 } },
+                            React.createElement("thead", null,
+                                React.createElement("tr", { style: { background: FOND, textAlign: "left" } },
+                                    React.createElement("th", { style: th }, "Client"),
+                                    React.createElement("th", { style: { ...th, textAlign: "right" } }, "Devis"),
+                                    React.createElement("th", { style: { ...th, textAlign: "right" } }, "Encaiss\u00E9"),
+                                    React.createElement("th", { style: { ...th, textAlign: "right" } }, "Reste"),
+                                    React.createElement("th", { style: { ...th, minWidth: 150 } }, "Mode de paiement"),
+                                    React.createElement("th", { style: { ...th, minWidth: 160 } }, "Statut paiement"))),
+                            React.createElement("tbody", null, commandes.map((c) => {
+                                var _a;
+                                const reste = Math.max((Number(c.montantDevis) || 0) - (Number(c.montantEncaisse) || 0), 0);
+                                return (React.createElement("tr", { key: c.id, style: { borderTop: `1px solid ${BORDURE}` } },
+                                    React.createElement("td", { style: { ...td, fontWeight: 600 } }, c.client),
+                                    React.createElement("td", { style: { ...td, textAlign: "right" } }, formatFCFA(c.montantDevis)),
+                                    React.createElement("td", { style: { ...td, textAlign: "right", color: "#1F9254", fontWeight: 600 } }, formatFCFA(c.montantEncaisse)),
+                                    React.createElement("td", { style: { ...td, textAlign: "right", color: reste > 0 ? ROUGE : TEXTE_GRIS } }, formatFCFA(reste)),
+                                    React.createElement("td", { style: td },
+                                        React.createElement(Select, { value: c.modePaiement, onChange: (v) => changerPaiement(c.id, "modePaiement", v), options: MODES_PAIEMENT, style: { padding: "6px 8px", fontSize: 12.5 } })),
+                                    React.createElement("td", { style: td },
+                                        React.createElement(Select, { value: c.statutPaiement, onChange: (v) => changerPaiement(c.id, "statutPaiement", v), options: STATUTS_PAIEMENT.map((s) => s.key), labels: STATUTS_PAIEMENT.map((s) => s.label), style: { padding: "6px 8px", fontSize: 12, fontWeight: 600, color: (_a = STATUTS_PAIEMENT.find((s) => s.key === c.statutPaiement)) === null || _a === void 0 ? void 0 : _a.color } }))));
+                            })))))))),
+            tab === "entreprise" && (React.createElement(EntrepriseTab, { entreprise: entreprise, onSaveEntreprise: persistEntreprise, messages: messages, onSaveMessages: persistMessages, copierMessage: copierMessage, copiedId: copiedId }))),
+        showForm && (React.createElement("div", { className: "no-print", style: { position: "fixed", inset: 0, background: "rgba(20,20,20,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 } },
+            React.createElement("div", { style: { background: BLANC, borderRadius: 14, width: "100%", maxWidth: 600, maxHeight: "90vh", overflowY: "auto" } },
+                React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 22px", borderBottom: `1px solid ${BORDURE}` } },
+                    React.createElement("div", { style: { fontWeight: 700, fontSize: 16 } }, editingId ? "Modifier la commande" : "Nouvelle commande"),
+                    React.createElement("button", { onClick: closeForm, style: { background: "none", border: "none", cursor: "pointer", padding: 4, fontSize: 16 } }, "\u2715")),
+                React.createElement("div", { style: { padding: 22, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 } },
+                    React.createElement("div", { style: { gridColumn: "1 / -1" } },
+                        React.createElement(Label, null, "Client *"),
+                        React.createElement(Input, { value: form.client, onChange: (v) => updateField("client", v), placeholder: "Ex. Ambassade du Zimbabwe" })),
+                    React.createElement("div", null,
+                        React.createElement(Label, null, "T\u00E9l\u00E9phone"),
+                        React.createElement(Input, { value: form.telephone, onChange: (v) => updateField("telephone", v), placeholder: "+221 ..." })),
+                    React.createElement("div", null,
+                        React.createElement(Label, null, "Email"),
+                        React.createElement(Input, { value: form.email, onChange: (v) => updateField("email", v), placeholder: "contact@client.com" })),
+                    React.createElement("div", null,
+                        React.createElement(Label, null, "Type de client"),
+                        React.createElement(Select, { value: form.typeClient, onChange: (v) => updateField("typeClient", v), options: TYPES_CLIENT })),
+                    React.createElement("div", null,
+                        React.createElement(Label, null, "Statut de la commande"),
+                        React.createElement(Select, { value: form.statut, onChange: (v) => updateField("statut", v), options: STATUTS.map((s) => s.key), labels: STATUTS.map((s) => s.label) })),
+                    React.createElement("div", { style: { gridColumn: "1 / -1" } },
+                        React.createElement(Label, null, "Site / adresse *"),
+                        React.createElement(Input, { value: form.site, onChange: (v) => updateField("site", v), placeholder: "Ex. Dakar, Almadies" })),
+                    React.createElement("div", null,
+                        React.createElement(Label, null, "Surface (m\u00B2)"),
+                        React.createElement(Input, { type: "number", value: form.surface, onChange: (v) => updateField("surface", v), placeholder: "0" })),
+                    React.createElement("div", null,
+                        React.createElement(Label, null, "Prix au m\u00B2 (FCFA)"),
+                        React.createElement(Input, { type: "number", value: form.prixM2, onChange: (v) => updateField("prixM2", v), placeholder: "0" })),
+                    React.createElement("div", { style: { gridColumn: "1 / -1" } },
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
+                            React.createElement(Label, null,
+                                "Montant devis (FCFA) ",
+                                !form.montantManuel && React.createElement("span", { style: { fontWeight: 400 } }, "\u2014 calcul\u00E9 automatiquement")),
+                            React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: TEXTE_GRIS, cursor: "pointer" } },
+                                React.createElement("input", { type: "checkbox", checked: form.montantManuel, onChange: (e) => updateField("montantManuel", e.target.checked) }),
+                                " Ajuster manuellement")),
+                        React.createElement(Input, { type: "number", value: form.montantDevis, onChange: (v) => updateField("montantDevis", v), disabled: !form.montantManuel, placeholder: "0" })),
+                    React.createElement("div", null,
+                        React.createElement(Label, null, "Montant encaiss\u00E9 (FCFA)"),
+                        React.createElement(Input, { type: "number", value: form.montantEncaisse, onChange: (v) => updateField("montantEncaisse", v), placeholder: "0" })),
+                    React.createElement("div", null,
+                        React.createElement(Label, null, "Mode de paiement"),
+                        React.createElement(Select, { value: form.modePaiement, onChange: (v) => updateField("modePaiement", v), options: MODES_PAIEMENT })),
+                    React.createElement("div", null,
+                        React.createElement(Label, null, "Statut du paiement"),
+                        React.createElement(Select, { value: form.statutPaiement, onChange: (v) => updateField("statutPaiement", v), options: STATUTS_PAIEMENT.map((s) => s.key), labels: STATUTS_PAIEMENT.map((s) => s.label) })),
+                    React.createElement("div", null,
+                        React.createElement(Label, null, "Date de la commande"),
+                        React.createElement(Input, { type: "date", value: form.dateCommande, onChange: (v) => updateField("dateCommande", v) })),
+                    React.createElement("div", null,
+                        React.createElement(Label, null, "Fin pr\u00E9vue"),
+                        React.createElement(Input, { type: "date", value: form.dateFinPrevue, onChange: (v) => updateField("dateFinPrevue", v) })),
+                    React.createElement("div", { style: { gridColumn: "1 / -1" } },
+                        React.createElement(Label, null, "Notes"),
+                        React.createElement("textarea", { value: form.notes, onChange: (e) => updateField("notes", e.target.value), rows: 3, style: { ...inputStyle, resize: "vertical", fontFamily: "inherit" }, placeholder: "D\u00E9tails, contraintes, contacts..." })),
+                    formError && React.createElement("div", { style: { gridColumn: "1 / -1", color: ROUGE_DEEP, fontSize: 13, background: "#FDECEC", padding: "8px 12px", borderRadius: 7 } }, formError)),
+                React.createElement("div", { style: { display: "flex", justifyContent: "flex-end", gap: 10, padding: "16px 22px", borderTop: `1px solid ${BORDURE}` } },
+                    React.createElement("button", { onClick: closeForm, style: { padding: "9px 16px", borderRadius: 9, border: `1px solid ${BORDURE}`, background: BLANC, fontSize: 13.5, fontWeight: 600, cursor: "pointer" } }, "Annuler"),
+                    React.createElement("button", { onClick: handleSave, style: { padding: "9px 18px", borderRadius: 9, border: "none", background: ROUGE, color: BLANC, fontSize: 13.5, fontWeight: 600, cursor: "pointer" } }, "Enregistrer"))))),
+        confirmDelete && (React.createElement("div", { className: "no-print", style: { position: "fixed", inset: 0, background: "rgba(20,20,20,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 } },
+            React.createElement("div", { style: { background: BLANC, borderRadius: 14, width: "100%", maxWidth: 380, padding: 22 } },
+                React.createElement("div", { style: { fontWeight: 700, fontSize: 15.5, marginBottom: 8 } }, "Supprimer cette commande ?"),
+                React.createElement("div", { style: { color: TEXTE_GRIS, fontSize: 13.5, marginBottom: 20 } }, "Cette action est d\u00E9finitive et supprimera toutes les donn\u00E9es associ\u00E9es."),
+                React.createElement("div", { style: { display: "flex", justifyContent: "flex-end", gap: 10 } },
+                    React.createElement("button", { onClick: () => setConfirmDelete(null), style: { padding: "9px 16px", borderRadius: 9, border: `1px solid ${BORDURE}`, background: BLANC, fontSize: 13.5, fontWeight: 600, cursor: "pointer" } }, "Annuler"),
+                    React.createElement("button", { onClick: () => handleDelete(confirmDelete), style: { padding: "9px 16px", borderRadius: 9, border: "none", background: ROUGE, color: BLANC, fontSize: 13.5, fontWeight: 600, cursor: "pointer" } }, "Supprimer"))))),
+        invoiceFor && (React.createElement("div", { className: "print-area", style: { position: "fixed", inset: 0, background: "rgba(20,20,20,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 60 } },
+            React.createElement("div", { style: { background: BLANC, borderRadius: 14, width: "100%", maxWidth: 680, maxHeight: "92vh", overflowY: "auto" } },
+                React.createElement("div", { className: "no-print", style: { display: "flex", justifyContent: "flex-end", gap: 8, padding: "14px 22px 0" } },
+                    React.createElement("button", { onClick: () => window.print(), style: { display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 9, border: `1px solid ${BORDURE}`, background: BLANC, fontSize: 13, fontWeight: 600, cursor: "pointer" } }, "\uD83D\uDDA8\uFE0F Imprimer / Enregistrer en PDF"),
+                    React.createElement("button", { onClick: () => setInvoiceFor(null), style: { background: "none", border: "none", cursor: "pointer", padding: 8, fontSize: 16 } }, "\u2715")),
+                React.createElement("div", { style: { padding: "10px 40px 40px" } },
+                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: `2px solid ${ROUGE}`, paddingBottom: 16, marginBottom: 24 } },
+                        React.createElement("div", null,
+                            React.createElement("div", { style: { fontFamily: "Georgia, serif", fontSize: 22, fontWeight: 700, color: NOIR } }, entreprise.nom),
+                            React.createElement("div", { style: { fontSize: 12.5, color: TEXTE_GRIS, fontStyle: "italic" } }, entreprise.slogan),
+                            React.createElement("div", { style: { fontSize: 12, color: TEXTE_GRIS, marginTop: 6 } }, entreprise.adresse),
+                            entreprise.telephone && React.createElement("div", { style: { fontSize: 12, color: TEXTE_GRIS } },
+                                "T\u00E9l. : ",
+                                entreprise.telephone),
+                            entreprise.email && React.createElement("div", { style: { fontSize: 12, color: TEXTE_GRIS } }, entreprise.email),
+                            entreprise.ninea && React.createElement("div", { style: { fontSize: 12, color: TEXTE_GRIS } },
+                                "NINEA/RC : ",
+                                entreprise.ninea)),
+                        React.createElement("div", { style: { textAlign: "right" } },
+                            React.createElement("div", { style: { fontFamily: "Georgia, serif", fontSize: 26, fontWeight: 700, color: ROUGE } }, "FACTURE"),
+                            React.createElement("div", { style: { fontSize: 12.5, color: TEXTE_GRIS, marginTop: 4 } },
+                                "N\u00B0 ",
+                                invoiceFor.numeroFacture),
+                            React.createElement("div", { style: { fontSize: 12.5, color: TEXTE_GRIS } },
+                                "Date : ",
+                                invoiceFor.dateFacture))),
+                    React.createElement("div", { style: { marginBottom: 22 } },
+                        React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: TEXTE_GRIS, letterSpacing: 0.4, marginBottom: 6 } }, "FACTUR\u00C9 \u00C0"),
+                        React.createElement("div", { style: { fontWeight: 700, fontSize: 15 } }, invoiceFor.client),
+                        React.createElement("div", { style: { fontSize: 13, color: TEXTE_GRIS } }, invoiceFor.site),
+                        invoiceFor.telephone && React.createElement("div", { style: { fontSize: 13, color: TEXTE_GRIS } }, invoiceFor.telephone),
+                        invoiceFor.email && React.createElement("div", { style: { fontSize: 13, color: TEXTE_GRIS } }, invoiceFor.email)),
+                    React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13.5, marginBottom: 22 } },
+                        React.createElement("thead", null,
+                            React.createElement("tr", { style: { background: NOIR } },
+                                React.createElement("th", { style: { padding: "10px 12px", textAlign: "left", color: BLANC, fontSize: 12 } }, "D\u00E9signation"),
+                                React.createElement("th", { style: { padding: "10px 12px", textAlign: "right", color: BLANC, fontSize: 12 } }, "Surface"),
+                                React.createElement("th", { style: { padding: "10px 12px", textAlign: "right", color: BLANC, fontSize: 12 } }, "Prix / m\u00B2"),
+                                React.createElement("th", { style: { padding: "10px 12px", textAlign: "right", color: BLANC, fontSize: 12 } }, "Montant"))),
+                        React.createElement("tbody", null,
+                            React.createElement("tr", { style: { borderBottom: `1px solid ${BORDURE}` } },
+                                React.createElement("td", { style: { padding: "10px 12px" } },
+                                    "Travaux de peinture \u2014 ",
+                                    invoiceFor.typeClient),
+                                React.createElement("td", { style: { padding: "10px 12px", textAlign: "right" } }, invoiceFor.surface ? `${invoiceFor.surface} m²` : "—"),
+                                React.createElement("td", { style: { padding: "10px 12px", textAlign: "right" } }, invoiceFor.prixM2 ? formatFCFA(invoiceFor.prixM2) : "—"),
+                                React.createElement("td", { style: { padding: "10px 12px", textAlign: "right", fontWeight: 700 } }, formatFCFA(invoiceFor.montantDevis))))),
+                    React.createElement("div", { style: { display: "flex", justifyContent: "flex-end", marginBottom: 22 } },
+                        React.createElement("div", { style: { width: 260 } },
+                            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "8px 0", fontSize: 13.5 } },
+                                React.createElement("span", { style: { color: TEXTE_GRIS } }, "Montant total"),
+                                React.createElement("span", { style: { fontWeight: 700 } }, formatFCFA(invoiceFor.montantDevis))),
+                            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "8px 0", fontSize: 13.5 } },
+                                React.createElement("span", { style: { color: TEXTE_GRIS } }, "D\u00E9j\u00E0 encaiss\u00E9"),
+                                React.createElement("span", { style: { color: "#1F9254", fontWeight: 700 } }, formatFCFA(invoiceFor.montantEncaisse))),
+                            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "10px 0", borderTop: `2px solid ${NOIR}`, fontSize: 15 } },
+                                React.createElement("span", { style: { fontWeight: 700 } }, "Solde d\u00FB"),
+                                React.createElement("span", { style: { fontWeight: 700, color: ROUGE } }, formatFCFA(Math.max((Number(invoiceFor.montantDevis) || 0) - (Number(invoiceFor.montantEncaisse) || 0), 0)))))),
+                    React.createElement("div", { style: { fontSize: 12.5, color: TEXTE_GRIS } },
+                        React.createElement("div", null,
+                            React.createElement("strong", { style: { color: TEXTE } }, "Mode de paiement :"),
+                            " ",
+                            invoiceFor.modePaiement),
+                        React.createElement("div", null,
+                            React.createElement("strong", { style: { color: TEXTE } }, "Statut du paiement :"),
+                            " ", (_a = STATUTS_PAIEMENT.find((s) => s.key === invoiceFor.statutPaiement)) === null || _a === void 0 ? void 0 :
+                            _a.label)),
+                    React.createElement("div", { style: { marginTop: 30, paddingTop: 16, borderTop: `1px solid ${BORDURE}`, fontSize: 11.5, color: TEXTE_GRIS, textAlign: "center" } },
+                        entreprise.nom,
+                        " \u2014 ",
+                        entreprise.adresse,
+                        " ",
+                        entreprise.siteWeb ? `• ${entreprise.siteWeb}` : "")))))));
+}
+function EmptyState({ onAdd }) {
+    return (React.createElement("div", { style: { background: BLANC, border: `1px dashed ${BORDURE}`, borderRadius: 12, padding: "60px 20px", textAlign: "center" } },
+        React.createElement("div", { style: { fontSize: 30, marginBottom: 12 } }, "\uD83D\uDCE5"),
+        React.createElement("div", { style: { fontWeight: 700, fontSize: 16, marginBottom: 6 } }, "Aucune commande enregistr\u00E9e"),
+        React.createElement("div", { style: { color: TEXTE_GRIS, fontSize: 13.5, marginBottom: 18 } }, "Ajoutez votre premi\u00E8re commande pour commencer le suivi de votre activit\u00E9."),
+        React.createElement("button", { onClick: onAdd, style: { background: ROUGE, color: BLANC, border: "none", borderRadius: 9, padding: "10px 18px", fontSize: 14, fontWeight: 600, cursor: "pointer" } }, "+ Nouvelle commande")));
+}
+function EntrepriseTab({ entreprise, onSaveEntreprise, messages, onSaveMessages, copierMessage, copiedId }) {
+    const [localEnt, setLocalEnt] = useState(entreprise);
+    const [savedFlash, setSavedFlash] = useState(false);
+    const [editingMsgId, setEditingMsgId] = useState(null);
+    const [msgDraft, setMsgDraft] = useState({ titre: "", contenu: "" });
+    useEffect(() => setLocalEnt(entreprise), [entreprise]);
+    function saveEnt() { onSaveEntreprise(localEnt); setSavedFlash(true); setTimeout(() => setSavedFlash(false), 1800); }
+    function startEditMsg(m) { setEditingMsgId(m.id); setMsgDraft({ titre: m.titre, contenu: m.contenu }); }
+    function startNewMsg() { setEditingMsgId("new"); setMsgDraft({ titre: "", contenu: "" }); }
+    function cancelMsg() { setEditingMsgId(null); }
+    function saveMsg() {
+        if (!msgDraft.titre.trim() || !msgDraft.contenu.trim())
+            return;
+        if (editingMsgId === "new")
+            onSaveMessages([...messages, { id: safeId(), ...msgDraft }]);
+        else
+            onSaveMessages(messages.map((m) => (m.id === editingMsgId ? { ...m, ...msgDraft } : m)));
+        setEditingMsgId(null);
+    }
+    function deleteMsg(id) { onSaveMessages(messages.filter((m) => m.id !== id)); }
+    return (React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 22 } },
+        React.createElement("div", { style: { background: BLANC, border: `1px solid ${BORDURE}`, borderRadius: 12, padding: "20px 22px" } },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 16 } },
+                "\u2699\uFE0F",
+                React.createElement("div", { style: { fontWeight: 700, fontSize: 15 } }, "Informations de l'entreprise")),
+            React.createElement("div", { style: { fontSize: 12.5, color: TEXTE_GRIS, marginBottom: 16 } }, "Ces informations apparaissent automatiquement sur vos factures g\u00E9n\u00E9r\u00E9es."),
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 } },
+                React.createElement("div", null,
+                    React.createElement(Label, null, "Nom de l'entreprise"),
+                    React.createElement(Input, { value: localEnt.nom, onChange: (v) => setLocalEnt({ ...localEnt, nom: v }) })),
+                React.createElement("div", null,
+                    React.createElement(Label, null, "Slogan"),
+                    React.createElement(Input, { value: localEnt.slogan, onChange: (v) => setLocalEnt({ ...localEnt, slogan: v }) })),
+                React.createElement("div", null,
+                    React.createElement(Label, null, "T\u00E9l\u00E9phone"),
+                    React.createElement(Input, { value: localEnt.telephone, onChange: (v) => setLocalEnt({ ...localEnt, telephone: v }), placeholder: "+221 ..." })),
+                React.createElement("div", null,
+                    React.createElement(Label, null, "Email"),
+                    React.createElement(Input, { value: localEnt.email, onChange: (v) => setLocalEnt({ ...localEnt, email: v }), placeholder: "contact@dakhomegroup.com" })),
+                React.createElement("div", { style: { gridColumn: "1 / -1" } },
+                    React.createElement(Label, null, "Adresse"),
+                    React.createElement(Input, { value: localEnt.adresse, onChange: (v) => setLocalEnt({ ...localEnt, adresse: v }) })),
+                React.createElement("div", null,
+                    React.createElement(Label, null, "NINEA / RC"),
+                    React.createElement(Input, { value: localEnt.ninea, onChange: (v) => setLocalEnt({ ...localEnt, ninea: v }) })),
+                React.createElement("div", null,
+                    React.createElement(Label, null, "Site web"),
+                    React.createElement(Input, { value: localEnt.siteWeb, onChange: (v) => setLocalEnt({ ...localEnt, siteWeb: v }) }))),
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginTop: 16 } },
+                React.createElement("button", { onClick: saveEnt, style: { padding: "9px 18px", borderRadius: 9, border: "none", background: ROUGE, color: BLANC, fontSize: 13.5, fontWeight: 600, cursor: "pointer" } }, "Enregistrer"),
+                savedFlash && React.createElement("span", { style: { fontSize: 12.5, color: "#1F9254", fontWeight: 600 } }, "\u2713 Enregistr\u00E9"))),
+        React.createElement("div", { style: { background: BLANC, border: `1px solid ${BORDURE}`, borderRadius: 12, padding: "20px 22px" } },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 } },
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+                    "\uD83D\uDCAC",
+                    React.createElement("div", { style: { fontWeight: 700, fontSize: 15 } }, "Mod\u00E8les de messages clients")),
+                React.createElement("button", { onClick: startNewMsg, style: { display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, border: `1px solid ${BORDURE}`, background: BLANC, fontSize: 12.5, fontWeight: 600, cursor: "pointer" } }, "\u2795 Nouveau mod\u00E8le")),
+            React.createElement("div", { style: { fontSize: 12.5, color: TEXTE_GRIS, marginBottom: 16 } },
+                "\u00C0 utiliser sur WhatsApp, SMS ou lors de vos \u00E9changes Wave/Orange Money avec le client. Les variables ",
+                "{client}",
+                " et ",
+                "{site}",
+                " peuvent \u00EAtre remplac\u00E9es \u00E0 la main avant l'envoi."),
+            React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10 } },
+                messages.map((m) => (React.createElement("div", { key: m.id, style: { border: `1px solid ${BORDURE}`, borderRadius: 10, padding: "12px 14px" } }, editingMsgId === m.id ? (React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } },
+                    React.createElement(Input, { value: msgDraft.titre, onChange: (v) => setMsgDraft({ ...msgDraft, titre: v }), placeholder: "Titre du mod\u00E8le" }),
+                    React.createElement("textarea", { value: msgDraft.contenu, onChange: (e) => setMsgDraft({ ...msgDraft, contenu: e.target.value }), rows: 3, style: { ...inputStyle, resize: "vertical", fontFamily: "inherit" } }),
+                    React.createElement("div", { style: { display: "flex", gap: 8, justifyContent: "flex-end" } },
+                        React.createElement("button", { onClick: cancelMsg, style: { padding: "7px 12px", borderRadius: 8, border: `1px solid ${BORDURE}`, background: BLANC, fontSize: 12.5, fontWeight: 600, cursor: "pointer" } }, "Annuler"),
+                        React.createElement("button", { onClick: saveMsg, style: { padding: "7px 12px", borderRadius: 8, border: "none", background: ROUGE, color: BLANC, fontSize: 12.5, fontWeight: 600, cursor: "pointer" } }, "Enregistrer")))) : (React.createElement("div", null,
+                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 } },
+                        React.createElement("div", { style: { fontWeight: 700, fontSize: 13.5 } }, m.titre),
+                        React.createElement("div", { style: { display: "flex", gap: 4 } },
+                            React.createElement("button", { onClick: () => copierMessage(m.id, m.contenu), style: iconBtn, title: "Copier" }, copiedId === m.id ? "✓" : "📄"),
+                            React.createElement("button", { onClick: () => startEditMsg(m), style: iconBtn, title: "Modifier" }, "\u270F\uFE0F"),
+                            React.createElement("button", { onClick: () => deleteMsg(m.id), style: iconBtn, title: "Supprimer" }, "\uD83D\uDDD1\uFE0F"))),
+                    React.createElement("div", { style: { fontSize: 13, color: TEXTE_GRIS, lineHeight: 1.5 } }, m.contenu)))))),
+                editingMsgId === "new" && (React.createElement("div", { style: { border: `1px solid ${ROUGE}`, borderRadius: 10, padding: "12px 14px" } },
+                    React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } },
+                        React.createElement(Input, { value: msgDraft.titre, onChange: (v) => setMsgDraft({ ...msgDraft, titre: v }), placeholder: "Titre du mod\u00E8le" }),
+                        React.createElement("textarea", { value: msgDraft.contenu, onChange: (e) => setMsgDraft({ ...msgDraft, contenu: e.target.value }), rows: 3, style: { ...inputStyle, resize: "vertical", fontFamily: "inherit" }, placeholder: "Contenu du message..." }),
+                        React.createElement("div", { style: { display: "flex", gap: 8, justifyContent: "flex-end" } },
+                            React.createElement("button", { onClick: cancelMsg, style: { padding: "7px 12px", borderRadius: 8, border: `1px solid ${BORDURE}`, background: BLANC, fontSize: 12.5, fontWeight: 600, cursor: "pointer" } }, "Annuler"),
+                            React.createElement("button", { onClick: saveMsg, style: { padding: "7px 12px", borderRadius: 8, border: "none", background: ROUGE, color: BLANC, fontSize: 12.5, fontWeight: 600, cursor: "pointer" } }, "Enregistrer")))))),
+            React.createElement("div", { style: { fontSize: 11.5, color: TEXTE_GRIS, marginTop: 14 } }, "\uD83D\uDCDE Le Dashboard ne peut pas envoyer les messages directement \u2014 copiez le texte pour l'envoyer depuis votre t\u00E9l\u00E9phone."))));
+}
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(Dashboard, null));
+
+</script>
+</body>
+</html>
